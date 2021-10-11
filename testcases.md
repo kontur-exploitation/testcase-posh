@@ -5,84 +5,72 @@
 # Задание 2
 Разберись, что делает этот скрипт (построчно). Будь готов рассказать о механике скрипта на собеседовании.
 ```
-$GLPath = "$env:SystemDrive\gitlab-runner"
-$GLBin  = "$GLPath\gitlab-runner.exe"
-$Token  = $using:Token
-$User   = $using:User
-$Pass   = $using:Pass
-$GitUri = 'https://github.com/git-for-windows/git/releases/download/v2.25.0.windows.1/Git-2.25.0-64-bit.exe'
-$Uri    = 'https://gitlab-runner-downloads.s3.amazonaws.com/latest/binaries/gitlab-runner-windows-amd64.exe'
+param (
+    [String] $role_id = $null,
+    [String] $secret_id = $null,
+    [string] $VaultAddr = 'https://vault.kontur.host'
+)
 
-$progressPreference = 'silentlyContinue'
-[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]'Ssl3,Tls,Tls11,Tls12'
+if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(`
+    [Security.Principal.WindowsBuiltInRole] "Administrator")) {
+    $newProcess = New-Object System.Diagnostics.ProcessStartInfo "PowerShell";
+    $newProcess.Arguments = "-Command $($myInvocation.line)"
+    $newProcess.Verb = "runas";
+    [System.Diagnostics.Process]::Start($newProcess) | Out-Null;
+    exit
+}
 
-& git --version | Out-Null
+[System.Environment]::SetEnvironmentVariable('HOME', $env:USERPROFILE, [System.EnvironmentVariableTarget]::User)
+[System.Environment]::SetEnvironmentVariable('VAULT_ADDR', $VaultAddr, [System.EnvironmentVariableTarget]::Machine)
+
+if ($role_id -and $secret_id) {
+  $body = @{"role_id" = $role_id; "secret_id" = $secret_id} | ConvertTo-Json
+  $Response = Invoke-WebRequest -Method Post -Body $body -Uri "$env:VAULT_ADDR/v1/auth/approle/login" -ErrorAction Stop
+  $content = $Response.Content | ConvertFrom-Json | Select-Object -ExpandProperty auth
+  $token = $content.client_token
+  $token | Out-File "$env:USERPROFILE\.vault-token" -Encoding ascii    
+    $token | Out-File "$env:windir\System32\config\systemprofile\.vault-token" -Encoding ascii  
+  exit 0
+}
+try{ & vault --version | Out-Null }catch{}
 if ($LASTEXITCODE -ne 0) {
-    Set-Location "$env:windir\temp"
-    Invoke-WebRequest -UseBasicParsing -Uri $GitUri -OutFile ".\git-installer.exe"
-    Start-Process '.\git-installer.exe' -ArgumentList '/SILENT' -NoNewWindow -Wait
-    Remove-Item '.\git-installer.exe' -Force
-    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+    choco install vault --yes -s kontur -f    
 }
 
-if(Get-Service "gitlab-runner" -ea 0){
-    $bin = (Get-WmiObject win32_service | Where-Object{$_.Name -like 'gitlab-runner'} | Select-Object PathName).PathName -split ' ' | Select-Object -First 1
-    $GLPath = Split-Path $bin -Parent
-    Set-Location $GLPath
-    & $bin --version | Where-Object {$_ -match '^Version:\s*(\d+\.\d+\.\d+)'} | Out-Null
-    $VersionOld = [version]$Matches[1]
-    if(!$VersionOld) {
-        throw "Error"
-        exit 1
+$isNeedToken = $false
+$current = vault token lookup -format "json" 2>&1
+if ($LASTEXITCODE -eq 0) {
+    $token = $current | ConvertFrom-Json | Select-Object -ExpandProperty data
+    $ExpireDays = New-TimeSpan -Start (Get-Date) -End (Get-Date($token.expire_time)) | Select-Object -ExpandProperty days     
+    if ($null -ne $token -and $ExpireDays -lt 10) {
+        vault token revoke -self
+        $isNeedToken = $true
+    } else {
+        $token.id | Out-File "$env:windir\System32\config\systemprofile\.vault-token" -Encoding ascii
+        Write-Host "Nothing to do, $ExpireDays days left before the token expires" -ForegroundColor Green
+    vault read secret/data/evrika/services/git_readonly 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      Write-Warning "Сannot read the test secret, need to update the token"
+      $isNeedToken = $true 
     }
-
-    $GLBinNew = "$GLPath\gitlab-runner_new.exe"
-    Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $GLBinNew
-
-    & $GLBinNew --version | Where-Object {$_ -match '^Version:\s*(\d+\.\d+\.\d+)'} | Out-Null
-    $VersionNew = [version]$Matches[1]
-
-    if($VersionOld -ge $VersionNew){
-        Remove-Item $GLBinNew
-        exit 0
     }
-
-    Write-Host "`nУстановка версии $VersionNew"
-    & $bin stop      2>&1 | Write-Host
-    & $bin uninstall 2>&1 | Write-Host
-    Remove-Item $bin -Force
-
-    Rename-Item $GLBinNew -NewName $GLBin
-    & $GLBin install --user "$User" --password "$Pass" 2>&1 | Write-Host
-    & $GLBin start 2>&1 | Write-Host
-
-    Write-Host "`nDone."
+} else {
+    $isNeedToken = $true
 }
-else{
-    New-Item -ItemType Directory -Path $GLPath -ea 0
-    Set-Location $GLPath
-    $Tags = @{$true='Evrika-dev';$false='Evrika-prod'}[([System.Net.Dns]::GetHostByName("localhost").HostName) -match 'dev.kontur']
-    Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $GLBin
 
-    & $GLBin install --user "$User" --password "$Pass" 2>&1 | Write-Host
-
-    $tmp = New-TemporaryFile
-    secedit /export /cfg "$tmp.inf" | Out-Null
-    (gc -Encoding ascii "$tmp.inf") -replace '^SeServiceLogonRight .+', "`$0,$User" | sc -Encoding ascii "$tmp.inf"
-    secedit /import /cfg "$tmp.inf" /db "$tmp.sdb" | Out-Null
-    secedit /configure /db "$tmp.sdb" /cfg "$tmp.inf" | Out-Null
-    rm $tmp* -ea 0
-
-    & $GLBin register                     `
-        --non-interactive                 `
-        --url 'https://git.skbkontur.ru/' `
-        --registration-token $Token       `
-        --executor "shell"                `
-        --description "Evrika"            `
-        --tag-list $Tags 2>&1 | Write-Host
-
-    Write-Host "`nStart gitlab-runner"
-    & $GLBin start 2>&1 | Write-Host
+if ($isNeedToken) {    
+  while ($isNeedToken) {
+    Write-Host "`nIssue token for $env:USERNAME" -ForegroundColor Green
+    $token = vault login -token-only -method=ldap username=$env:USERNAME 
+    if ($LASTEXITCODE -eq 0) {
+      $isNeedToken = $false
+    } else {
+      Write-Host "`nIncorrect password for $env:USERNAME or network error" -ForegroundColor Red
+    }
+  }
+    
+    $token | Out-File "$env:USERPROFILE\.vault-token" -Encoding ascii    
+    $token | Out-File "$env:windir\System32\config\systemprofile\.vault-token" -Encoding ascii
 }
 ```
 
