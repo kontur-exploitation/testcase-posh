@@ -4,7 +4,7 @@
 
 # Задание 2
 Разберись, что делает этот скрипт (построчно). Будь готов рассказать о механике скрипта на собеседовании.
-```
+```powershell
 $GLPath = "$env:SystemDrive\gitlab-runner"
 $GLBin  = "$GLPath\gitlab-runner.exe"
 $Token  = $using:Token
@@ -84,7 +84,7 @@ else{
     Write-Host "`nStart gitlab-runner"
     & $GLBin start 2>&1 | Write-Host
 }
-```
+``
 
 # Задание 3
 Напиши скрипт, который:
