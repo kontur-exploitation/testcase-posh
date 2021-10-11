@@ -84,7 +84,7 @@ else{
     Write-Host "`nStart gitlab-runner"
     & $GLBin start 2>&1 | Write-Host
 }
-``
+```
 
 # Задание 3
 Напиши скрипт, который:
